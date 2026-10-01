@@ -1,19 +1,13 @@
-libcoraza (1.8.0-1) unstable; urgency=low
+libcoraza (1.8.0-0keel1) trixie; urgency=medium
 
-  * New upstream release 1.8.0.
-  * Export coraza_is_response_body_accessible(): the response-side counterpart
-    of coraza_is_request_body_accessible(). coraza_is_response_body_processable()
-    only checks the Content-Type against SecResponseBodyMimeType, so under
-    "SecResponseBodyAccess Off" connectors could not tell the body would not
-    be inspected and delayed response headers for nothing (coraza-nginx#140,
-    coraza-apache#60).
-  * Build-Depends: golang-go (>= 2:1.26~), matching the go 1.26.0 directive
-    in go.mod (builds on jammy/noble pull it from ppa:longsleep/golang-backports).
+  * First Keel package (handbook decision 0041, first implementation,
+    step 5): the C library the Nginx connector of Coraza loads. Not in
+    Debian and no ITP. Built offline from the upstream release tarball and
+    a vendor component tarball of its Go modules (debian/README.source).
+  * Built with golang-1.26-go from trixie-backports: Coraza 3.7 requires
+    Go 1.25 and libcoraza 1.8.0 Go 1.26, and trixie's golang-go is 1.24.
+  * The soname is libcoraza.so.1, set at link time; upstream builds an
+    unversioned libcoraza.so. The static archive is not shipped, since
+    nothing in Keel links it.
 
- -- Pierre Pomes <pierre.pomes@gmail.com>  Wed, 23 Sep 2026 13:24:44 -0400
-
-libcoraza (1.1.1-1) unstable; urgency=low
-
-  * Initial Debian packaging.
-
- -- Pierre Pomes <pierre.pomes@gmail.com>  Tue, 17 Mar 2026 12:00:00 +0100
+ -- Marcos Mendez <mendez.foto@gmail.com>  Thu, 01 Oct 2026 12:00:00 +0000

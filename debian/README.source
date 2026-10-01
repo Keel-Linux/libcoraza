@@ -1,0 +1,45 @@
+libcoraza source for Keel Linux
+===============================
+
+Branches and tarballs
+---------------------
+
+The repository follows DEP-14 as git-buildpackage repositories on salsa
+do: upstream/latest holds the imported upstream tarballs, pristine-tar
+their deltas, and keel/trixie this package. `gbp buildpackage` rebuilds
+both orig tarballs byte for byte from pristine-tar.
+
+The main tarball is upstream's GitHub release archive:
+
+  https://github.com/corazawaf/libcoraza/archive/refs/tags/v1.8.0.tar.gz
+  libcoraza_1.8.0.orig.tar.gz
+  sha256 f303f65d3bbd97e90aef5c26d2251949f4a8c7a4d8615a2d78c87455b0fa148c
+
+The vendor component
+--------------------
+
+libcoraza_<version>.orig-vendor.tar.gz unpacks as vendor/: the Go modules
+of upstream's go.mod, so that the build runs with -mod=vendor,
+GOPROXY=off and GOTOOLCHAIN=local and fetches nothing, as in Debian. It is
+written from the main tarball, with golang-1.26-go from trixie-backports:
+
+  mkdir src && tar -xzf libcoraza_1.8.0.orig.tar.gz -C src --strip-components=1
+  cd src
+  export GOPATH="$PWD/../gopath" GOFLAGS=-modcacherw GOTOOLCHAIN=local
+  /usr/lib/go-1.26/bin/go mod download
+  /usr/lib/go-1.26/bin/go mod verify      # against go.sum
+  /usr/lib/go-1.26/bin/go mod vendor
+  tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+      --mode='u+rw,go=rX' --format=gnu -cf ../vendor.tar vendor
+  cd .. && gzip -n -9 -c vendor.tar > libcoraza_1.8.0.orig-vendor.tar.gz
+
+The same go.sum gives the same bytes. For 1.8.0:
+
+  vendor.tar                          sha256 59864857f5d6baec73913092d4d1c1b735293caab8705ddcbf88293e3c3461d0
+  libcoraza_1.8.0.orig-vendor.tar.gz  sha256 9b5443249ab0070a85680165d3530e13af8b3fc051e3135aace7bbccea8c08f5
+
+Import a new version with both tarballs side by side:
+
+  gbp import-orig --pristine-tar libcoraza_<version>.orig.tar.gz
+
+(debian/gbp.conf names the vendor component.)

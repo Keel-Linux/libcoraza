@@ -4,56 +4,60 @@ include /usr/share/dpkg/pkg-info.mk
 include /usr/share/dpkg/architecture.mk
 
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
-export GOPATH = $(CURDIR)/.gopath
-export GOCACHE = $(CURDIR)/.gocache
-export GOFLAGS = -mod=vendor
-export GOPROXY = off
-export GONOSUMCHECK = *
-export GOTOOLCHAIN = local
+include /usr/share/dpkg/buildflags.mk
 
 SOMAJOR = 1
-SOVER = $(DEB_VERSION_UPSTREAM)
-MULTIARCH_LIBDIR = usr/lib/$(DEB_HOST_MULTIARCH)
+LIBDIR = usr/lib/$(DEB_HOST_MULTIARCH)
+GO_ROOT = /usr/lib/go-1.26
+
+# Offline, from vendor/ only (debian/README.source), with the Go of
+# golang-1.26-go and never a downloaded toolchain.
+export PATH := $(GO_ROOT)/bin:$(PATH)
+export GOPATH = $(CURDIR)/debian/.gopath
+export GOCACHE = $(CURDIR)/debian/.gocache
+export GOPROXY = off
+export GOTOOLCHAIN = local
+export GOFLAGS = -mod=vendor -trimpath -buildvcs=false \
+	-ldflags=-extldflags=-Wl,-soname,libcoraza.so.$(SOMAJOR)
+export CGO_ENABLED = 1
+export CGO_CFLAGS = $(CFLAGS) $(CPPFLAGS)
+export CGO_LDFLAGS = $(LDFLAGS)
 
 %:
 	dh $@
 
 override_dh_autoreconf:
-	./build.sh
+	dh_autoreconf ./build.sh
 
 override_dh_auto_configure:
-	dh_auto_configure -- --libdir=/usr/lib/$(DEB_HOST_MULTIARCH)
+	dh_auto_configure -- --libdir=/$(LIBDIR)
 
 override_dh_auto_build:
-	$(MAKE) all
-
-override_dh_auto_install:
-	# Install manually to decouple from the check target
-	install -d debian/tmp/$(MULTIARCH_LIBDIR)
-	install -d debian/tmp/usr/include/coraza
-	install -m 0755 libcoraza.so debian/tmp/$(MULTIARCH_LIBDIR)/
-	install -m 0644 libcoraza.a debian/tmp/$(MULTIARCH_LIBDIR)/
-	install -m 0644 coraza/coraza.h debian/tmp/usr/include/coraza/coraza.h
-	# Set SONAME and create versioned symlink chain
-	patchelf --set-soname libcoraza.so.$(SOMAJOR) debian/tmp/$(MULTIARCH_LIBDIR)/libcoraza.so
-	mv debian/tmp/$(MULTIARCH_LIBDIR)/libcoraza.so debian/tmp/$(MULTIARCH_LIBDIR)/libcoraza.so.$(SOVER)
-	ln -s libcoraza.so.$(SOVER) debian/tmp/$(MULTIARCH_LIBDIR)/libcoraza.so.$(SOMAJOR)
-	ln -s libcoraza.so.$(SOMAJOR) debian/tmp/$(MULTIARCH_LIBDIR)/libcoraza.so
+	$(MAKE) coraza/coraza.h libcoraza.so
 
 override_dh_auto_test:
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
-	# Run only the C integration test; skip go test -race (not portable across archs)
-	$(MAKE) tests/simple_get
+	# The upstream C test links the static archive; go test -race is
+	# skipped as upstream's own package does (not on every architecture).
+	$(MAKE) libcoraza.a tests/simple_get
 	cd tests && ./check_result.sh simple_get
+	go test ./...
 endif
 
-override_dh_dwz:
-	# Skip dwz compression (incompatible with cgo-built shared libraries)
+override_dh_auto_install:
+	install -d debian/tmp/$(LIBDIR) debian/tmp/usr/include/coraza
+	install -m 0644 libcoraza.so debian/tmp/$(LIBDIR)/libcoraza.so.$(DEB_VERSION_UPSTREAM)
+	ln -s libcoraza.so.$(DEB_VERSION_UPSTREAM) debian/tmp/$(LIBDIR)/libcoraza.so.$(SOMAJOR)
+	ln -s libcoraza.so.$(SOMAJOR) debian/tmp/$(LIBDIR)/libcoraza.so
+	install -m 0644 coraza/coraza.h debian/tmp/usr/include/coraza/coraza.h
 
-override_dh_strip:
-	dh_strip --no-automatic-dbgsym
+override_dh_dwz:
+	# dwz does not handle the DWARF of a cgo shared object
+
+override_dh_gencontrol:
+	dh_gencontrol -- -Vmisc:Static-Built-Using="$(shell dpkg-query -f='$${source:Package} (= $${source:Version})' -W golang-1.26-go)"
 
 override_dh_auto_clean:
 	[ ! -f Makefile ] || $(MAKE) distclean
-	chmod -Rf u+w .gopath .gocache 2>/dev/null || true
-	rm -rf .gopath .gocache
+	chmod -Rf u+w debian/.gopath debian/.gocache 2>/dev/null || true
+	rm -rf debian/.gopath debian/.gocache coraza libcoraza.so libcoraza.a libcoraza.h
