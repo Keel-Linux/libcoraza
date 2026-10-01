@@ -1,0 +1,810 @@
+package main
+
+/*
+#ifndef _LIBCORAZA_H_
+#define _LIBCORAZA_H_
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stddef.h>
+
+// Library version. Bumped by release-please alongside version.txt; the
+// x-release-please-* annotations below are what it keys off, and
+// `make check-version-sync` fails the build if the two ever drift.
+//
+// LIBCORAZA_VERSION_NUM is the form to test against. Use it to guard against
+// ABI changes -- for example the coraza_process_* calls returned 1 on an engine
+// error before 1.5.0, and return the tri-state coraza_result_t from 1.5.0 on:
+//
+//     #if LIBCORAZA_VERSION_NUM >= 10500
+//
+// Consumers that dlopen libcoraza rather than link against it cannot use these
+// macros, because they describe the header that was compiled against and not
+// the library that ends up loaded. Call coraza_version_num() instead.
+#define LIBCORAZA_VERSION_MAJOR 1 // x-release-please-major
+#define LIBCORAZA_VERSION_MINOR 8 // x-release-please-minor
+#define LIBCORAZA_VERSION_PATCH 0 // x-release-please-patch
+#define LIBCORAZA_VERSION_NUM   (LIBCORAZA_VERSION_MAJOR * 10000 + \
+                                 LIBCORAZA_VERSION_MINOR * 100   + \
+                                 LIBCORAZA_VERSION_PATCH)
+
+typedef struct coraza_intervention_t
+{
+	char *action;
+    int status;
+    int pause;
+    int disruptive;
+	char *data;
+    int rule_id;
+} coraza_intervention_t;
+
+typedef uintptr_t coraza_waf_config_t;
+typedef uintptr_t coraza_waf_t;
+typedef uintptr_t coraza_transaction_t;
+typedef uintptr_t coraza_matched_rule_t;
+
+typedef enum coraza_result_t {
+	CORAZA_ERROR = -1,
+	CORAZA_OK = 0,
+	CORAZA_INTERRUPTION = 1,
+} coraza_result_t;
+
+typedef enum coraza_debug_log_level_t {
+	CORAZA_DEBUG_LOG_LEVEL_UNKNOWN,
+	CORAZA_DEBUG_LOG_LEVEL_TRACE,
+	CORAZA_DEBUG_LOG_LEVEL_DEBUG,
+	CORAZA_DEBUG_LOG_LEVEL_INFO,
+	CORAZA_DEBUG_LOG_LEVEL_WARN,
+	CORAZA_DEBUG_LOG_LEVEL_ERROR,
+} coraza_debug_log_level_t;
+
+typedef void (*coraza_debug_log_cb) (void *, coraza_debug_log_level_t, const char *msg, const char *fields);
+
+typedef enum coraza_severity_t {
+	CORAZA_SEVERITY_UNKNOWN,
+	CORAZA_SEVERITY_DEBUG,
+	CORAZA_SEVERITY_INFO,
+	CORAZA_SEVERITY_NOTICE,
+	CORAZA_SEVERITY_WARNING,
+	CORAZA_SEVERITY_ERROR,
+	CORAZA_SEVERITY_CRITICAL,
+	CORAZA_SEVERITY_ALERT,
+	CORAZA_SEVERITY_EMERGENCY,
+} coraza_severity_t;
+
+typedef void (*coraza_error_cb) (void *, coraza_matched_rule_t);
+
+#endif
+
+static void call_debug_log_cb(coraza_debug_log_cb cb, void *ctx, coraza_debug_log_level_t level, const char *msg, const char *fields) {
+	cb(ctx, level, msg, fields);
+}
+
+static void call_error_cb(coraza_error_cb cb, void *ctx, coraza_matched_rule_t rule) {
+	cb(ctx, rule);
+}
+
+*/
+import "C"
+import (
+	"io"
+	"os"
+	"runtime/cgo"
+	"strconv"
+	"unsafe"
+
+	"github.com/corazawaf/coraza/v3"
+	"github.com/corazawaf/coraza/v3/debuglog"
+	"github.com/corazawaf/coraza/v3/experimental"
+	"github.com/corazawaf/coraza/v3/experimental/plugins/plugintypes"
+	"github.com/corazawaf/coraza/v3/types"
+	"golang.org/x/exp/constraints"
+)
+
+type WafConfigHandle struct {
+	config     coraza.WAFConfig
+	rulesAdded int
+}
+
+type WafHandle struct {
+	waf        coraza.WAF
+	rulesCount int
+}
+
+// SWIG INTERFACE SYNC NOTE: When adding, removing, or changing any //export
+// function in this file, coraza.i must be updated accordingly (add an extern
+// declaration, or add a %ignore directive for callback-based functions).
+// Run `make check-swig-sync` to verify the two files are in sync.
+
+//export coraza_new_waf_config
+func coraza_new_waf_config() C.coraza_waf_config_t {
+	return C.coraza_waf_config_t(cgo.NewHandle(&WafConfigHandle{
+		config: coraza.NewWAFConfig(),
+	}))
+}
+
+//export coraza_rules_add_file
+func coraza_rules_add_file(c C.coraza_waf_config_t, file *C.char) C.int {
+	configHandle := fromRaw[*WafConfigHandle](c)
+	configHandle.config = configHandle.config.WithDirectivesFromFile(C.GoString(file))
+	configHandle.rulesAdded++
+	return 0
+}
+
+//export coraza_rules_add
+func coraza_rules_add(c C.coraza_waf_config_t, directives *C.char) C.int {
+	configHandle := fromRaw[*WafConfigHandle](c)
+	configHandle.config = configHandle.config.WithDirectives(C.GoString(directives))
+	configHandle.rulesAdded++
+	return 0
+}
+
+/**
+ * Adds a debug log callback to a WAF config
+ * @param[in] pointer to valid WAF config
+ * @param[in] pointer to log callback
+ * @param[in] pointer to custom user context passed every time the log callback is called. This must live as long as
+ * while the parent config and its dependent objects are active.
+ * @returns 0 on success, 1 on failure
+ */
+//export coraza_add_debug_log_callback
+func coraza_add_debug_log_callback(c C.coraza_waf_config_t, cb C.coraza_debug_log_cb, userContext *C.void) C.int {
+	configHandle := fromRaw[*WafConfigHandle](c)
+	configHandle.config = configHandle.config.WithDebugLogger(newDebugLogger(func(lvl debuglog.Level, message, fields string) {
+		rawLevel := C.CORAZA_DEBUG_LOG_LEVEL_UNKNOWN
+		switch lvl {
+		case debuglog.LevelTrace:
+			rawLevel = C.CORAZA_DEBUG_LOG_LEVEL_TRACE
+		case debuglog.LevelDebug:
+			rawLevel = C.CORAZA_DEBUG_LOG_LEVEL_DEBUG
+		case debuglog.LevelInfo:
+			rawLevel = C.CORAZA_DEBUG_LOG_LEVEL_INFO
+		case debuglog.LevelWarn:
+			rawLevel = C.CORAZA_DEBUG_LOG_LEVEL_WARN
+		case debuglog.LevelError:
+			rawLevel = C.CORAZA_DEBUG_LOG_LEVEL_ERROR
+		default:
+			rawLevel = C.CORAZA_DEBUG_LOG_LEVEL_UNKNOWN
+		}
+		cMsg := C.CString(message)
+		cFields := C.CString(fields)
+		defer C.free(unsafe.Pointer(cMsg))
+		defer C.free(unsafe.Pointer(cFields))
+		C.call_debug_log_cb(cb, unsafe.Pointer(userContext), C.coraza_debug_log_level_t(rawLevel), cMsg, cFields)
+	}))
+	return 0
+}
+
+/**
+ * Adds a error callback to a WAF config
+ * @param[in] pointer to valid WAF config
+ * @param[in] pointer to error callback
+ * @param[in] pointer to custom user context passed every time the error callback is called. This must live as long as
+ * while the parent config and its dependent objects are active.
+ * @returns 0 on success, 1 on failure
+ */
+//export coraza_add_error_callback
+func coraza_add_error_callback(c C.coraza_waf_config_t, cb C.coraza_error_cb, userContext *C.void) C.int {
+	configHandle := fromRaw[*WafConfigHandle](c)
+	configHandle.config = configHandle.config.WithErrorCallback(func(rule types.MatchedRule) {
+		ruleHandle := cgo.NewHandle(rule)
+		defer ruleHandle.Delete()
+		C.call_error_cb(cb, unsafe.Pointer(userContext), C.coraza_matched_rule_t(ruleHandle))
+	})
+	return 0
+}
+
+//export coraza_free_waf_config
+func coraza_free_waf_config(config C.coraza_waf_config_t) C.int {
+	deleteRaw(config)
+	return 0
+}
+
+/**
+ * Creates a new  WAF instance
+ * @returns pointer to WAF instance
+ */
+//export coraza_new_waf
+func coraza_new_waf(config C.coraza_waf_config_t, er **C.char) C.coraza_waf_t {
+	configHandle := fromRaw[*WafConfigHandle](config)
+	waf, err := coraza.NewWAF(configHandle.config)
+	if err != nil {
+		*er = C.CString(err.Error())
+		return 0
+	}
+	return C.coraza_waf_t(cgo.NewHandle(&WafHandle{
+		waf:        waf,
+		rulesCount: configHandle.rulesAdded,
+	}))
+}
+
+/**
+ * Creates a new transaction for a WAF instance
+ * @param[in] pointer to valid WAF instance
+ * @returns pointer to transaction
+ */
+//export coraza_new_transaction
+func coraza_new_transaction(w C.coraza_waf_t) C.coraza_transaction_t {
+	handle := fromRaw[*WafHandle](w)
+	tx := handle.waf.NewTransaction()
+	return C.coraza_transaction_t(cgo.NewHandle(tx))
+}
+
+//export coraza_new_transaction_with_id
+func coraza_new_transaction_with_id(w C.coraza_waf_t, id *C.char) C.coraza_transaction_t {
+	handle := fromRaw[*WafHandle](w)
+	tx := handle.waf.NewTransactionWithID(C.GoString(id))
+	return C.coraza_transaction_t(cgo.NewHandle(tx))
+}
+
+//export coraza_intervention
+func coraza_intervention(t C.coraza_transaction_t) *C.coraza_intervention_t {
+	tx := fromRaw[types.Transaction](t)
+	if tx.Interruption() == nil {
+		return nil
+	}
+	mem := (*C.coraza_intervention_t)(C.calloc(1, C.size_t(unsafe.Sizeof(C.coraza_intervention_t{}))))
+	mem.action = C.CString(tx.Interruption().Action)
+	if tx.Interruption().Data != "" {
+		mem.data = C.CString(tx.Interruption().Data)
+	}
+	mem.status = C.int(tx.Interruption().Status)
+	mem.rule_id = C.int(tx.Interruption().RuleID)
+	return mem
+}
+
+//export coraza_process_connection
+func coraza_process_connection(t C.coraza_transaction_t, sourceAddress *C.char, clientPort C.int, serverHost *C.char, serverPort C.int) C.int {
+	tx := fromRaw[types.Transaction](t)
+	srcAddr := C.GoString(sourceAddress)
+	cp := int(clientPort)
+	ch := C.GoString(serverHost)
+	sp := int(serverPort)
+	tx.ProcessConnection(srcAddr, cp, ch, sp)
+	return 0
+}
+
+//export coraza_process_request_body
+func coraza_process_request_body(t C.coraza_transaction_t) C.int {
+	tx := fromRaw[types.Transaction](t)
+	it, err := tx.ProcessRequestBody()
+	if err != nil {
+		return C.CORAZA_ERROR
+	}
+	if it != nil {
+		return C.CORAZA_INTERRUPTION
+	}
+	return C.CORAZA_OK
+}
+
+// coraza_is_request_body_accessible reports whether the engine will inspect the
+// request body, i.e. whether SecRequestBodyAccess is on for this transaction.
+// It is the request-side counterpart of coraza_is_response_body_processable.
+//
+// A connector may call this once after coraza_process_request_headers() and, on
+// 0, skip only the body *submission* calls — coraza_append_request_body() and
+// coraza_request_body_from_file() — because the engine discards those bytes
+// anyway. That saves the per-chunk cgo crossings and the body copies.
+//
+// It must NOT be used to skip coraza_process_request_body(). That call still
+// evaluates the whole request-body rule phase when access is off: core takes the
+// !RequestBodyAccess branch straight to Rules.Eval(PhaseRequestBody), so phase-2
+// rules matching on headers, ARGS or any non-body variable still run there, and
+// the call can still return an interruption. Skipping it would bypass those
+// rules — a fail-open inspection gap, not an optimisation.
+//
+// Returns 1 when the body is accessible, 0 otherwise.
+//
+//export coraza_is_request_body_accessible
+func coraza_is_request_body_accessible(t C.coraza_transaction_t) C.int {
+	tx := fromRaw[types.Transaction](t)
+	if tx.IsRequestBodyAccessible() {
+		return 1
+	}
+	return 0
+}
+
+//export coraza_update_status_code
+func coraza_update_status_code(t C.coraza_transaction_t, code C.int) C.int {
+	tx := fromRaw[types.Transaction](t)
+	txi, ok := tx.(plugintypes.TransactionState)
+	if !ok {
+		return 1
+	}
+	s, ok := txi.Variables().ResponseStatus().(interface{ Set(string) })
+	if !ok {
+		return 1
+	}
+	s.Set(strconv.Itoa(int(code)))
+	return 0
+}
+
+// msr->t, r->unparsed_uri, r->method, r->protocol + offset
+//
+//export coraza_process_uri
+func coraza_process_uri(t C.coraza_transaction_t, uri *C.char, method *C.char, proto *C.char) C.int {
+	tx := fromRaw[types.Transaction](t)
+
+	tx.ProcessURI(C.GoString(uri), C.GoString(method), C.GoString(proto))
+	return 0
+}
+
+//export coraza_add_request_header
+func coraza_add_request_header(t C.coraza_transaction_t, name *C.char, name_len C.int, value *C.char, value_len C.int) C.int {
+	tx := fromRaw[types.Transaction](t)
+	tx.AddRequestHeader(C.GoStringN(name, name_len), C.GoStringN(value, value_len))
+	return 0
+}
+
+// coraza_add_request_headers adds multiple request headers from a packed buffer.
+// Encoding: [name_len u16][name_bytes][value_len u32][value_bytes] × count
+//
+//export coraza_add_request_headers
+func coraza_add_request_headers(t C.coraza_transaction_t, packed *C.char, packed_len C.int, count C.int) C.int {
+	if packed_len < 0 || count < 0 {
+		return C.CORAZA_ERROR
+	}
+	tx := fromRaw[types.Transaction](t)
+	buf := C.GoBytes(unsafe.Pointer(packed), packed_len)
+	off := 0
+	for i := 0; i < int(count); i++ {
+		if off+2 > len(buf) {
+			return C.CORAZA_ERROR
+		}
+		nameLen := int(uint16(buf[off])<<8 | uint16(buf[off+1]))
+		off += 2
+		if off+nameLen > len(buf) {
+			return C.CORAZA_ERROR
+		}
+		name := string(buf[off : off+nameLen])
+		off += nameLen
+		if off+4 > len(buf) {
+			return C.CORAZA_ERROR
+		}
+		vl := uint32(buf[off])<<24 | uint32(buf[off+1])<<16 | uint32(buf[off+2])<<8 | uint32(buf[off+3])
+		if vl > uint32(len(buf)) {
+			return C.CORAZA_ERROR
+		}
+		valueLen := int(vl)
+		off += 4
+		if off+valueLen > len(buf) {
+			return C.CORAZA_ERROR
+		}
+		value := string(buf[off : off+valueLen])
+		off += valueLen
+		tx.AddRequestHeader(name, value)
+	}
+	return C.CORAZA_OK
+}
+
+//export coraza_process_request_headers
+func coraza_process_request_headers(t C.coraza_transaction_t) C.int {
+	tx := fromRaw[types.Transaction](t)
+	if it := tx.ProcessRequestHeaders(); it != nil {
+		return C.CORAZA_INTERRUPTION
+	}
+	return C.CORAZA_OK
+}
+
+//export coraza_process_logging
+func coraza_process_logging(t C.coraza_transaction_t) C.int {
+	tx := fromRaw[types.Transaction](t)
+	tx.ProcessLogging()
+	return 0
+}
+
+//export coraza_append_request_body
+func coraza_append_request_body(t C.coraza_transaction_t, data *C.uchar, length C.int) C.int {
+	tx := fromRaw[types.Transaction](t)
+	if _, _, err := tx.WriteRequestBody(C.GoBytes(unsafe.Pointer(data), length)); err != nil {
+		return 1
+	}
+	return 0
+}
+
+//export coraza_add_get_args
+func coraza_add_get_args(t C.coraza_transaction_t, name *C.char, value *C.char) C.int {
+	tx := fromRaw[types.Transaction](t)
+	tx.AddGetRequestArgument(C.GoString(name), C.GoString(value))
+	return 0
+}
+
+//export coraza_add_response_header
+func coraza_add_response_header(t C.coraza_transaction_t, name *C.char, name_len C.int, value *C.char, value_len C.int) C.int {
+	tx := fromRaw[types.Transaction](t)
+	tx.AddResponseHeader(C.GoStringN(name, name_len), C.GoStringN(value, value_len))
+	return 0
+}
+
+// coraza_add_response_headers adds multiple response headers from a packed buffer.
+// Same encoding as coraza_add_request_headers.
+//
+//export coraza_add_response_headers
+func coraza_add_response_headers(t C.coraza_transaction_t, packed *C.char, packed_len C.int, count C.int) C.int {
+	if packed_len < 0 || count < 0 {
+		return C.CORAZA_ERROR
+	}
+	tx := fromRaw[types.Transaction](t)
+	buf := C.GoBytes(unsafe.Pointer(packed), packed_len)
+	off := 0
+	for i := 0; i < int(count); i++ {
+		if off+2 > len(buf) {
+			return C.CORAZA_ERROR
+		}
+		nameLen := int(uint16(buf[off])<<8 | uint16(buf[off+1]))
+		off += 2
+		if off+nameLen > len(buf) {
+			return C.CORAZA_ERROR
+		}
+		name := string(buf[off : off+nameLen])
+		off += nameLen
+		if off+4 > len(buf) {
+			return C.CORAZA_ERROR
+		}
+		vl := uint32(buf[off])<<24 | uint32(buf[off+1])<<16 | uint32(buf[off+2])<<8 | uint32(buf[off+3])
+		if vl > uint32(len(buf)) {
+			return C.CORAZA_ERROR
+		}
+		valueLen := int(vl)
+		off += 4
+		if off+valueLen > len(buf) {
+			return C.CORAZA_ERROR
+		}
+		value := string(buf[off : off+valueLen])
+		off += valueLen
+		tx.AddResponseHeader(name, value)
+	}
+	return C.CORAZA_OK
+}
+
+//export coraza_append_response_body
+func coraza_append_response_body(t C.coraza_transaction_t, data *C.uchar, length C.int) C.int {
+	tx := fromRaw[types.Transaction](t)
+	if _, _, err := tx.WriteResponseBody(C.GoBytes(unsafe.Pointer(data), length)); err != nil {
+		return 1
+	}
+	return 0
+}
+
+//export coraza_process_response_body
+func coraza_process_response_body(t C.coraza_transaction_t) C.int {
+	tx := fromRaw[types.Transaction](t)
+	it, err := tx.ProcessResponseBody()
+	if err != nil {
+		return C.CORAZA_ERROR
+	}
+	if it != nil {
+		return C.CORAZA_INTERRUPTION
+	}
+	return C.CORAZA_OK
+}
+
+//export coraza_process_response_headers
+func coraza_process_response_headers(t C.coraza_transaction_t, status C.int, proto *C.char) C.int {
+	tx := fromRaw[types.Transaction](t)
+	if it := tx.ProcessResponseHeaders(int(status), C.GoString(proto)); it != nil {
+		return C.CORAZA_INTERRUPTION
+	}
+	return C.CORAZA_OK
+}
+
+//export coraza_is_response_body_processable
+func coraza_is_response_body_processable(t C.coraza_transaction_t) C.int {
+	tx := fromRaw[types.Transaction](t)
+	if tx.IsResponseBodyProcessable() {
+		return 1
+	}
+	return 0
+}
+
+// coraza_is_response_body_accessible reports whether SecResponseBodyAccess is
+// on for this transaction. It is the response-side counterpart of
+// coraza_is_request_body_accessible, and the missing half of
+// coraza_is_response_body_processable: that predicate only checks the
+// Content-Type against SecResponseBodyMimeType and does not consult the access
+// flag, so under "SecResponseBodyAccess Off" it still returns 1 for a listed
+// type although the engine will discard the body. A connector deciding whether
+// the response body will be inspected -- and therefore whether it must hold the
+// headers back for a clean phase-4 error page -- has to test both:
+// accessible && processable.
+//
+// Call it after coraza_process_response_headers(). On 0 (or when processable is
+// 0) skip only coraza_append_response_body(); coraza_process_response_body()
+// must still be called, since phase-4 rules on non-body variables
+// (RESPONSE_STATUS, RESPONSE_HEADERS, ARGS, TX) run there regardless.
+//
+// Returns 1 when the body is accessible, 0 otherwise.
+//
+//export coraza_is_response_body_accessible
+func coraza_is_response_body_accessible(t C.coraza_transaction_t) C.int {
+	tx := fromRaw[types.Transaction](t)
+	if tx.IsResponseBodyAccessible() {
+		return 1
+	}
+	return 0
+}
+
+/**
+ * Version of the library actually loaded, in LIBCORAZA_VERSION_NUM form.
+ *
+ * This is what a consumer that dlopens libcoraza must use; the
+ * LIBCORAZA_VERSION_* macros only describe the header it compiled against.
+ * Absent before 1.7.0, so a failed dlsym() means "older than 1.7.0" and
+ * nothing more precise.
+ */
+//export coraza_version_num
+func coraza_version_num() C.int {
+	return C.int(C.LIBCORAZA_VERSION_NUM)
+}
+
+//export coraza_rules_count
+func coraza_rules_count(w C.coraza_waf_t) C.int {
+	handle := fromRaw[*WafHandle](w)
+	rules, ok := handle.waf.(experimental.WAFWithRules)
+	if !ok {
+		return C.int(handle.rulesCount)
+	}
+	return C.int(rules.RulesCount())
+}
+
+//export coraza_free_transaction
+func coraza_free_transaction(t C.coraza_transaction_t) C.int {
+	tx := fromRaw[types.Transaction](t)
+	if tx.Close() != nil {
+		return 1
+	}
+	deleteRaw(t)
+	return 0
+}
+
+//export coraza_free_intervention
+func coraza_free_intervention(it *C.coraza_intervention_t) C.int {
+	if it == nil {
+		return 1
+	}
+	defer C.free(unsafe.Pointer(it))
+	C.free(unsafe.Pointer(it.action))
+	if it.data != nil {
+		C.free(unsafe.Pointer(it.data))
+	}
+	return 0
+}
+
+//export coraza_rules_merge
+func coraza_rules_merge(w1 C.coraza_waf_t, w2 C.coraza_waf_t, er **C.char) C.int {
+	return 0
+}
+
+//export coraza_request_body_from_file
+func coraza_request_body_from_file(t C.coraza_transaction_t, file *C.char) C.int {
+	tx := fromRaw[types.Transaction](t)
+	f, err := os.Open(C.GoString(file))
+	if err != nil {
+		return 1
+	}
+	defer f.Close()
+	// we read the file in chunks and send it to the engine
+	for {
+		buf := make([]byte, 1024)
+		n, err := f.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return 1
+		}
+		if _, _, err := tx.WriteRequestBody(buf[:n]); err != nil {
+			return 1
+		}
+	}
+	return 0
+}
+
+//export coraza_free_waf
+func coraza_free_waf(t C.coraza_waf_t) C.int {
+	deleteRaw(t)
+	return 0
+}
+
+// coraza_free_string frees a string returned by libcoraza (e.g. from
+// coraza_matched_rule_get_error_log). Callers must use this instead of
+// libc free() to avoid allocator mismatches on Windows.
+//
+//export coraza_free_string
+func coraza_free_string(s *C.char) {
+	C.free(unsafe.Pointer(s))
+}
+
+/**
+ * Returns the severity of a matched rule.
+ * @param[in] pointer to matched rule
+ * @returns severity of the matched rule
+ */
+//export coraza_matched_rule_get_severity
+func coraza_matched_rule_get_severity(r C.coraza_matched_rule_t) C.coraza_severity_t {
+	matchedRule := fromRaw[types.MatchedRule](r)
+	switch matchedRule.Rule().Severity() {
+	case types.RuleSeverityEmergency:
+		return C.CORAZA_SEVERITY_EMERGENCY
+	case types.RuleSeverityAlert:
+		return C.CORAZA_SEVERITY_ALERT
+	case types.RuleSeverityCritical:
+		return C.CORAZA_SEVERITY_CRITICAL
+	case types.RuleSeverityError:
+		return C.CORAZA_SEVERITY_ERROR
+	case types.RuleSeverityWarning:
+		return C.CORAZA_SEVERITY_WARNING
+	case types.RuleSeverityNotice:
+		return C.CORAZA_SEVERITY_NOTICE
+	case types.RuleSeverityInfo:
+		return C.CORAZA_SEVERITY_INFO
+	case types.RuleSeverityDebug:
+		return C.CORAZA_SEVERITY_DEBUG
+	}
+	return C.CORAZA_SEVERITY_UNKNOWN
+}
+
+/*
+ * Returns the error log of a matched rule. The caller is responsible for freeing the returned string.
+ * @param[in] pointer to matched rule
+ * @returns error log of the matched rule
+ */
+//export coraza_matched_rule_get_error_log
+func coraza_matched_rule_get_error_log(r C.coraza_matched_rule_t) *C.char {
+	rule := fromRaw[types.MatchedRule](r)
+	cMsg := C.CString(rule.ErrorLog())
+	return cMsg
+}
+
+/*
+ * Returns the numeric ID of the rule that produced this matched rule
+ * (the integer from the seclang `id:` action). 0 if the rule has no
+ * configured ID — Coraza requires IDs in production rule sets but the
+ * type allows zero for synthetic / runtime-built rules.
+ */
+//export coraza_matched_rule_get_id
+func coraza_matched_rule_get_id(r C.coraza_matched_rule_t) C.int {
+	rule := fromRaw[types.MatchedRule](r)
+	return C.int(rule.Rule().ID())
+}
+
+/*
+Internal helpers
+*/
+
+// It should just be C.CString(s) but we need this to build tests
+func stringToC(s string) *C.char {
+	return C.CString(s)
+}
+
+// It should just be C.GoString(c) but we need this to build tests
+func stringFromC(c *C.char) string {
+	return C.GoString(c)
+}
+
+func txFromCgoHandle(h cgo.Handle) C.coraza_transaction_t {
+	return C.coraza_transaction_t(h)
+}
+
+func wafFromCgoHandle(h cgo.Handle) C.coraza_waf_t {
+	return C.coraza_waf_t(h)
+}
+
+func fromRaw[T any, U constraints.Unsigned](raw U) T {
+	return cgo.Handle(raw).Value().(T)
+}
+
+func deleteRaw[U constraints.Unsigned](raw U) {
+	cgo.Handle(raw).Delete()
+}
+
+// appendRequestBody is an internal helper that calls coraza_append_request_body with a Go byte slice.
+// An empty slice is treated as a no-op (C functions must not receive a nil data pointer with length > 0).
+func appendRequestBody(t C.coraza_transaction_t, data []byte) C.int {
+	if len(data) == 0 {
+		return 0
+	}
+	return coraza_append_request_body(t, (*C.uchar)(unsafe.Pointer(&data[0])), C.int(len(data)))
+}
+
+// appendResponseBody is an internal helper that calls coraza_append_response_body with a Go byte slice.
+// An empty slice is treated as a no-op (C functions must not receive a nil data pointer with length > 0).
+func appendResponseBody(t C.coraza_transaction_t, data []byte) C.int {
+	if len(data) == 0 {
+		return 0
+	}
+	return coraza_append_response_body(t, (*C.uchar)(unsafe.Pointer(&data[0])), C.int(len(data)))
+}
+
+// addRequestHeaderStr is an internal helper that calls coraza_add_request_header with Go strings.
+func addRequestHeaderStr(t C.coraza_transaction_t, name, value string) C.int {
+	cName := C.CString(name)
+	cValue := C.CString(value)
+	defer C.free(unsafe.Pointer(cName))
+	defer C.free(unsafe.Pointer(cValue))
+	return coraza_add_request_header(t, cName, C.int(len(name)), cValue, C.int(len(value)))
+}
+
+// processConnectionStr is an internal helper that calls coraza_process_connection with Go strings,
+// freeing the allocated C strings before returning.
+func processConnectionStr(t C.coraza_transaction_t, sourceAddress string, clientPort int, serverHost string, serverPort int) C.int {
+	cSrc := C.CString(sourceAddress)
+	cSrv := C.CString(serverHost)
+	defer C.free(unsafe.Pointer(cSrc))
+	defer C.free(unsafe.Pointer(cSrv))
+	return coraza_process_connection(t, cSrc, C.int(clientPort), cSrv, C.int(serverPort))
+}
+
+// processUriStr is an internal helper that calls coraza_process_uri with Go strings,
+// freeing the allocated C strings before returning.
+func processUriStr(t C.coraza_transaction_t, uri, method, proto string) C.int {
+	cUri := C.CString(uri)
+	cMethod := C.CString(method)
+	cProto := C.CString(proto)
+	defer C.free(unsafe.Pointer(cUri))
+	defer C.free(unsafe.Pointer(cMethod))
+	defer C.free(unsafe.Pointer(cProto))
+	return coraza_process_uri(t, cUri, cMethod, cProto)
+}
+
+// processResponseHeadersStr is an internal helper that calls coraza_process_response_headers
+// with a Go string, freeing the allocated C string before returning.
+func processResponseHeadersStr(t C.coraza_transaction_t, status int, proto string) C.int {
+	cProto := C.CString(proto)
+	defer C.free(unsafe.Pointer(cProto))
+	return coraza_process_response_headers(t, C.int(status), cProto)
+}
+
+// newWafCheckError calls coraza_new_waf and returns (waf, true) when creation fails,
+// freeing the error string. This avoids the need for CGo in test files.
+func newWafCheckError(config C.coraza_waf_config_t) (C.coraza_waf_t, bool) {
+	var errStr *C.char
+	waf := coraza_new_waf(config, &errStr)
+	if errStr != nil {
+		C.free(unsafe.Pointer(errStr))
+		return waf, true
+	}
+	return waf, false
+}
+
+// captureMatchedRule installs a Go-level error callback on the given WAF config that
+// captures the first matched rule. It returns two functions: one to retrieve the
+// coraza_matched_rule_t handle for use in tests, and one to release the handle when done.
+func captureMatchedRule(c C.coraza_waf_config_t) (getHandle func() C.coraza_matched_rule_t, releaseHandle func()) {
+	var handle cgo.Handle
+	var captured bool
+
+	configHandle := fromRaw[*WafConfigHandle](c)
+	configHandle.config = configHandle.config.WithErrorCallback(func(rule types.MatchedRule) {
+		if !captured {
+			handle = cgo.NewHandle(rule)
+			captured = true
+		}
+	})
+
+	return func() C.coraza_matched_rule_t {
+		if !captured {
+			return 0
+		}
+		return C.coraza_matched_rule_t(handle)
+	}, func() {
+		if captured {
+			handle.Delete()
+		}
+	}
+}
+
+// freeString frees a C string allocated by coraza functions such as
+// coraza_matched_rule_get_error_log.
+func freeString(s *C.char) {
+	if s != nil {
+		C.free(unsafe.Pointer(s))
+	}
+}
+
+// severityToInt converts a coraza_severity_t enum to a Go int for use in test assertions.
+func severityToInt(s C.coraza_severity_t) int {
+	return int(s)
+}
+
+func main() {}
