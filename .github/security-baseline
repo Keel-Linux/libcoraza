@@ -1,0 +1,3 @@
+# Security scan baseline (keel-linux/.github, security-scan.yml): findings
+# that were read and are not a risk, one per line, the fingerprint and why.
+shellcheck:SC1087:build-aux/git-version-gen:93cddff2fdf6 shell lint, not a security risk: $prefix[0-9]* is a case glob as intended (gnulib's git-version-gen)
