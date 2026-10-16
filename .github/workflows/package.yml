@@ -1,39 +1,17 @@
-# Build and lint this package on trixie (handbook decision 0041, first
-# implementation, step 5). The check is "build / trixie".
-#
-# build: gbp buildpackage in a Debian trixie system container, an
-# unprivileged LXC container with its own systemd on the self-hosted runner
-# keel-lxc-1, through the reusable workflow lxc-trixie.yml of
-# Keel-Linux/.github, with trixie-backports enabled; source and binary, the
-# orig tarballs rebuilt from the pristine-tar branch. lintian then checks
-# the .changes and any error or warning fails the job, as packages/build of
-# Keel-Linux/common does. Nothing is signed or published; the files are
-# kept as the artifact "debs". Keel runs no application containers in CI.
-#
-# The orig tarballs, the vendor component of the Go modules included, come
-# from pristine-tar, and golang-1.26-go from trixie-backports; the build
-# runs upstream's C test and go test. This package has no debian/tests of
-# its own: the library is exercised in Nginx by the autopkgtest of
-# Keel-Linux/libnginx-mod-http-coraza, whose CI builds keel/trixie of this
-# repository.
-#
-# A pull request from a fork never reaches the self-hosted runner: the job
-# runs only for this repository's own branches, so a fork pull request gets
-# no build or lint result here.
+# Light CI on GitHub-hosted runners, for pull requests on the GitHub mirror
+# (decision 0056). The full CI is .forgejo/workflows on git.pop.coop, and
+# .forgejo/workflows/package.yml has the notes on each job.
 name: package
 
 on:
   pull_request:
-  push:
-    branches: [keel/trixie]
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    uses: keel-linux/.github/.github/workflows/github-debian-build.yml@main
     with:
       backports: true
       fetch-depth: 0
